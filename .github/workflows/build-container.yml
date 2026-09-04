@@ -1,0 +1,84 @@
+name: Reusable Container Check
+
+"on":
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub-hosted or self-hosted runner label.
+        type: string
+        default: ubuntu-24.04
+      context:
+        description: Docker build context.
+        type: string
+        default: .
+      dockerfile:
+        description: Dockerfile path.
+        type: string
+        default: ./Dockerfile
+      build_args:
+        description: Newline-separated Docker build arguments without secrets.
+        type: string
+        default: ""
+      trivy_severity:
+        description: Comma-separated severities that fail image scanning.
+        type: string
+        default: HIGH,CRITICAL
+      timeout_minutes:
+        description: Maximum runtime for the container job.
+        type: number
+        default: 25
+
+permissions:
+  contents: read
+
+jobs:
+  container-check:
+    name: Build and scan image
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build local image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: false
+          load: true
+          tags: local/ci-check:${{ github.sha }}
+          build-args: ${{ inputs.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: local/ci-check:${{ github.sha }}
+          scanners: vuln,secret,misconfig
+          severity: ${{ inputs.trivy_severity }}
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+  container-gate:
+    name: Container Gate
+    if: ${{ always() }}
+    needs:
+      - container-check
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 2
+    steps:
+      - name: Evaluate container job
+        env:
+          CONTAINER_RESULT: ${{ needs.container-check.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$CONTAINER_RESULT" != "success" ]]; then
+            echo "Container check result: $CONTAINER_RESULT" >&2
+            exit 1
+          fi

@@ -1,0 +1,12 @@
+{
+  "name": "ci-template-node-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "node --check src/add.js && node --check scripts/build.js",
+    "typecheck": "node --check src/add.js",
+    "test": "node --test",
+    "build": "node scripts/build.js"
+  }
+}

@@ -1,0 +1,45 @@
+name: CI
+
+"on":
+  pull_request:
+  merge_group:
+    types:
+      - checks_requested
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: CI
+    uses: YOUR_ORG/ci-template/.github/workflows/ci-node.yml@PINNED_TEMPLATE_SHA
+    with:
+      node_version: "24"
+      package_manager: npm
+      cache_dependency_path: package-lock.json
+      install_command: npm ci
+      lint_command: npm run lint
+      typecheck_command: npm run typecheck
+      test_command: npm test
+      build_command: npm run build
+
+  security:
+    name: Security
+    uses: YOUR_ORG/ci-template/.github/workflows/security.yml@PINNED_TEMPLATE_SHA
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write
+    with:
+      codeql_languages_json: '["javascript-typescript"]'
+
+  container:
+    name: Container
+    uses: YOUR_ORG/ci-template/.github/workflows/build-container.yml@PINNED_TEMPLATE_SHA
+    with:
+      context: .
+      dockerfile: ./Dockerfile

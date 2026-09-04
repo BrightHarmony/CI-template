@@ -1,0 +1,151 @@
+name: Reusable Node CI
+
+"on":
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node.js version used by the job.
+        type: string
+        default: "24"
+      runner:
+        description: GitHub-hosted or self-hosted runner label.
+        type: string
+        default: ubuntu-24.04
+      working_directory:
+        description: Directory containing package.json.
+        type: string
+        default: .
+      package_manager:
+        description: Cache mode supported by actions/setup-node (npm, yarn, or pnpm).
+        type: string
+        default: npm
+      cache_dependency_path:
+        description: Lockfile path relative to the repository root.
+        type: string
+        default: package-lock.json
+      setup_command:
+        description: Optional package-manager setup command, for example corepack enable.
+        type: string
+        default: ""
+      install_command:
+        description: Reproducible dependency installation command.
+        type: string
+        default: npm ci
+      lint_command:
+        description: Empty string skips lint.
+        type: string
+        default: npm run lint --if-present
+      typecheck_command:
+        description: Empty string skips type checking.
+        type: string
+        default: npm run typecheck --if-present
+      test_command:
+        description: Test command. It must return non-zero when tests fail.
+        type: string
+        default: npm test
+      build_command:
+        description: Empty string skips the application build.
+        type: string
+        default: npm run build --if-present
+      coverage_path:
+        description: Coverage path relative to working_directory; empty disables upload.
+        type: string
+        default: ""
+      timeout_minutes:
+        description: Maximum runtime for the quality job.
+        type: number
+        default: 15
+    outputs:
+      gate_result:
+        description: Stable aggregate result for downstream jobs.
+        value: ${{ jobs.ci-gate.outputs.result }}
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality and tests
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: ${{ inputs.package_manager }}
+          cache-dependency-path: ${{ inputs.cache_dependency_path }}
+
+      - name: Set up package manager
+        if: ${{ inputs.setup_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.setup_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.install_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Lint
+        if: ${{ inputs.lint_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.lint_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Type check
+        if: ${{ inputs.typecheck_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.typecheck_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Test
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.test_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Build
+        if: ${{ inputs.build_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.build_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Upload coverage
+        if: ${{ always() && inputs.coverage_path != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ github.sha }}
+          path: ${{ inputs.working_directory }}/${{ inputs.coverage_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  ci-gate:
+    name: CI Gate
+    if: ${{ always() }}
+    needs:
+      - quality
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 2
+    outputs:
+      result: ${{ steps.gate.outputs.result }}
+    steps:
+      - name: Evaluate required jobs
+        id: gate
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$QUALITY_RESULT" != "success" ]]; then
+            echo "Quality and tests result: $QUALITY_RESULT" >&2
+            exit 1
+          fi
+          echo "result=success" >> "$GITHUB_OUTPUT"

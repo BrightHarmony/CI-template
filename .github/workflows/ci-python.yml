@@ -1,0 +1,186 @@
+name: Reusable Python CI
+
+"on":
+  workflow_call:
+    inputs:
+      python_versions_json:
+        description: JSON array of Python versions verified by the matrix.
+        type: string
+        default: '["3.11"]'
+      uv_version:
+        description: Exact uv version installed from PyPI.
+        type: string
+        default: "0.11.17"
+      runner:
+        description: GitHub-hosted or self-hosted runner label.
+        type: string
+        default: ubuntu-24.04
+      working_directory:
+        description: Directory containing pyproject.toml and uv.lock.
+        type: string
+        default: .
+      fetch_depth:
+        description: Checkout history depth; use 0 for diff-aware policy checks.
+        type: number
+        default: 1
+      install_command:
+        description: Reproducible dependency installation command.
+        type: string
+        default: uv sync --frozen --all-extras
+      lint_command:
+        description: Empty string skips lint.
+        type: string
+        default: uv run --frozen ruff check src tests scripts
+      format_command:
+        description: Empty string skips formatting verification.
+        type: string
+        default: uv run --frozen ruff format --check src tests
+      typecheck_command:
+        description: Empty string skips type checking.
+        type: string
+        default: uv run --frozen mypy src
+      metadata_command:
+        description: Optional metadata or schema validation command.
+        type: string
+        default: ""
+      policy_command:
+        description: Optional repository-specific policy command.
+        type: string
+        default: ""
+      test_command:
+        description: Offline test command; it must fail when tests fail.
+        type: string
+        default: uv run --frozen pytest -m "not integration"
+      build_command:
+        description: Empty string skips package build verification.
+        type: string
+        default: uv build
+      coverage_path:
+        description: Coverage path relative to working_directory; empty disables upload.
+        type: string
+        default: ""
+      timeout_minutes:
+        description: Maximum runtime for each Python matrix job.
+        type: number
+        default: 15
+    outputs:
+      gate_result:
+        description: Stable aggregate result for downstream jobs.
+        value: ${{ jobs.ci-gate.outputs.result }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(inputs.python_versions_json) }}
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+      UV_PYTHON_DOWNLOADS: never
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: ${{ inputs.fetch_depth }}
+
+      - name: Set up Python
+        uses: actions/setup-python@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pinned uv
+        env:
+          UV_VERSION: ${{ inputs.uv_version }}
+        run: python -m pip install --disable-pip-version-check --no-deps "uv==$UV_VERSION"
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.install_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Lint
+        if: ${{ inputs.lint_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.lint_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Check formatting
+        if: ${{ inputs.format_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.format_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Type check
+        if: ${{ inputs.typecheck_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.typecheck_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Validate metadata
+        if: ${{ inputs.metadata_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.metadata_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Validate repository policy
+        if: ${{ inputs.policy_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
+          RUN_COMMAND: ${{ inputs.policy_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Run tests
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.test_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Build package
+        if: ${{ inputs.build_command != '' }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          RUN_COMMAND: ${{ inputs.build_command }}
+        run: bash -euo pipefail -c "$RUN_COMMAND"
+
+      - name: Upload coverage
+        if: ${{ always() && inputs.coverage_path != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-${{ matrix.python-version }}-coverage-${{ github.sha }}
+          path: ${{ inputs.working_directory }}/${{ inputs.coverage_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  ci-gate:
+    name: CI Gate
+    if: ${{ always() }}
+    needs:
+      - verify
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 2
+    outputs:
+      result: ${{ steps.gate.outputs.result }}
+    steps:
+      - name: Evaluate required jobs
+        id: gate
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$VERIFY_RESULT" != "success" ]]; then
+            echo "Python verification result: $VERIFY_RESULT" >&2
+            exit 1
+          fi
+          echo "result=success" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,59 @@
+name: Research CI
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - main
+  merge_group:
+    types:
+      - checks_requested
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Python quality
+    uses: YOUR_ORG/ci-template/.github/workflows/ci-python.yml@PINNED_TEMPLATE_SHA
+    with:
+      python_versions_json: '["3.11", "3.14"]'
+      fetch_depth: 0
+      metadata_command: uv run --frozen auction-meta-validate .
+      policy_command: python scripts/validate_research_policy.py --base "$CI_BASE_SHA"
+
+  security:
+    name: Security
+    uses: YOUR_ORG/ci-template/.github/workflows/security.yml@PINNED_TEMPLATE_SHA
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write
+    with:
+      codeql_languages_json: '["python"]'
+
+  research-gate:
+    name: Research Gate
+    if: ${{ always() }}
+    needs:
+      - quality
+      - security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Evaluate required workflows
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+        run: |
+          set -euo pipefail
+          for result in "$QUALITY_RESULT" "$SECURITY_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "A required workflow ended with: $result" >&2
+              exit 1
+            fi
+          done

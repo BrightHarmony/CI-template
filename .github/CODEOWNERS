@@ -1,0 +1,8 @@
+# 首次推送前必须替换为真实且具有 write 权限的 GitHub Team。
+* @YOUR_ORG/platform-team
+
+# CI、安全、所有权和治理文件必须由平台团队审查。
+/.github/ @YOUR_ORG/platform-team
+/scripts/ @YOUR_ORG/platform-team
+/docs/rulesets.md @YOUR_ORG/platform-team
+/SECURITY.md @YOUR_ORG/platform-team

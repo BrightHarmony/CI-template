@@ -1,0 +1,132 @@
+name: Reusable Security
+
+"on":
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub-hosted or self-hosted runner label.
+        type: string
+        default: ubuntu-24.04
+      codeql_languages_json:
+        description: JSON array of CodeQL languages.
+        type: string
+        default: '["javascript-typescript"]'
+      enable_dependency_review:
+        description: Run dependency review for pull requests.
+        type: boolean
+        default: true
+      enable_codeql:
+        description: Run CodeQL analysis.
+        type: boolean
+        default: true
+      enable_trivy_fs:
+        description: Scan dependencies, secrets, and configuration with Trivy.
+        type: boolean
+        default: true
+      trivy_severity:
+        description: Comma-separated severities that fail the Trivy job.
+        type: string
+        default: HIGH,CRITICAL
+      timeout_minutes:
+        description: Maximum runtime for each security job.
+        type: number
+        default: 20
+    outputs:
+      gate_result:
+        description: Stable aggregate security result.
+        value: ${{ jobs.security-gate.outputs.result }}
+
+permissions:
+  contents: read
+  pull-requests: read
+  security-events: write
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    if: ${{ inputs.enable_dependency_review && github.event_name == 'pull_request' }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@05fe4576374b728f0c523d6a13d64c25081e0803 # v4.8.3
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    if: ${{ inputs.enable_codeql }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(inputs.codeql_languages_json) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@fddeee1a7ece751b577e409a89057319e3172939 # v4
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@fddeee1a7ece751b577e409a89057319e3172939 # v4
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@fddeee1a7ece751b577e409a89057319e3172939 # v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  trivy-fs:
+    name: Trivy repository scan
+    if: ${{ inputs.enable_trivy_fs }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Scan repository
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: ${{ inputs.trivy_severity }}
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+  security-gate:
+    name: Security Gate
+    if: ${{ always() }}
+    needs:
+      - dependency-review
+      - codeql
+      - trivy-fs
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 2
+    outputs:
+      result: ${{ steps.gate.outputs.result }}
+    steps:
+      - name: Evaluate security jobs
+        id: gate
+        env:
+          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+          TRIVY_RESULT: ${{ needs.trivy-fs.result }}
+        run: |
+          set -euo pipefail
+          for result in \
+            "$DEPENDENCY_REVIEW_RESULT" \
+            "$CODEQL_RESULT" \
+            "$TRIVY_RESULT"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "A required security job ended with: $result" >&2
+              exit 1
+            fi
+          done
+          echo "result=success" >> "$GITHUB_OUTPUT"

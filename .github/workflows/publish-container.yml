@@ -1,0 +1,156 @@
+name: Reusable Container Publish
+
+"on":
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub-hosted or self-hosted runner label.
+        type: string
+        default: ubuntu-24.04
+      registry:
+        description: Container registry hostname.
+        type: string
+        default: ghcr.io
+      image_name:
+        description: Image path without registry, normally owner/repository.
+        type: string
+        required: true
+      registry_username:
+        description: Registry username; empty uses github.actor.
+        type: string
+        default: ""
+      context:
+        description: Docker build context.
+        type: string
+        default: .
+      dockerfile:
+        description: Dockerfile path.
+        type: string
+        default: ./Dockerfile
+      platform:
+        description: Target platform; use a matching runner for non-amd64 builds.
+        type: string
+        default: linux/amd64
+      build_args:
+        description: Newline-separated non-secret Docker build arguments.
+        type: string
+        default: ""
+      trivy_severity:
+        description: Comma-separated severities that fail image scanning.
+        type: string
+        default: HIGH,CRITICAL
+      timeout_minutes:
+        description: Maximum runtime for the publish job.
+        type: number
+        default: 35
+    secrets:
+      registry_token:
+        description: Optional registry token; GHCR can use the caller GITHUB_TOKEN.
+        required: false
+    outputs:
+      digest:
+        description: Published image digest.
+        value: ${{ jobs.publish.outputs.digest }}
+      image_ref:
+        description: Immutable published image reference.
+        value: ${{ jobs.publish.outputs.image_ref }}
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  publish:
+    name: Publish and attest image
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image_ref: ${{ steps.image.outputs.ref }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ inputs.registry_username || github.actor }}
+          password: ${{ secrets.registry_token || github.token }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ inputs.registry }}/${{ inputs.image_name }}
+          tags: |
+            type=raw,value=sha-${{ github.sha }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platform }}
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: ${{ inputs.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
+
+      - name: Resolve immutable image reference
+        id: image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ inputs.registry }}/${{ inputs.image_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Unexpected image digest: $DIGEST" >&2
+            exit 1
+          fi
+          echo "ref=$IMAGE@$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Scan published image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.ref }}
+          scanners: vuln,secret,misconfig
+          severity: ${{ inputs.trivy_severity }}
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Create GitHub artifact attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ inputs.registry }}/${{ inputs.image_name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  publish-gate:
+    name: Publish Gate
+    if: ${{ always() }}
+    needs:
+      - publish
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 2
+    steps:
+      - name: Evaluate publish job
+        env:
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$PUBLISH_RESULT" != "success" ]]; then
+            echo "Container publish result: $PUBLISH_RESULT" >&2
+            exit 1
+          fi

@@ -1,0 +1,21 @@
+name: Release
+
+"on":
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    uses: YOUR_ORG/ci-template/.github/workflows/release-container.yml@PINNED_TEMPLATE_SHA
+    permissions:
+      contents: write
+      packages: write
+    with:
+      image_name: ${{ github.repository }}
+      publish_latest: true
+      create_github_release: true
