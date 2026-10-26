@@ -49,7 +49,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout_minutes }}
     steps:
       - name: Review dependency changes
-        uses: actions/dependency-review-action@05fe4576374b728f0c523d6a13d64c25081e0803 # v4.8.3
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
           comment-summary-in-pr: never
@@ -65,7 +65,7 @@ jobs:
         language: ${{ fromJSON(inputs.codeql_languages_json) }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@fddeee1a7ece751b577e409a89057319e3172939 # v4
@@ -87,7 +87,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout_minutes }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Scan repository
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
